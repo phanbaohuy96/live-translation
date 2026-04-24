@@ -11,25 +11,33 @@ overlay window.
 cd /Users/huy.phan/personal/projects/ai/live-translate
 make doctor                 # check prerequisites
 make setup                  # create venv + install deps
-make install-blackhole      # one-time; virtual audio driver
 
 # Cloud translation (Claude):
 export ANTHROPIC_API_KEY=sk-ant-...
-make run
+make run                   # no-admin ScreenCaptureKit audio
 
 # -- or --
 
 # Local translation (Ollama):
 make ollama-pull            # downloads qwen2.5:7b (~4.7 GB)
-make run-local
+make run-local              # no-admin ScreenCaptureKit audio
 ```
 
-Before the first real run, finish the **Multi-Output Device** step so you can
-hear the meeting while BlackHole captures it:
+macOS may prompt for Screen Recording / System Audio Recording permission the
+first time the helper starts. Grant it in **System Settings → Privacy & Security
+→ Screen & System Audio Recording**, then run the command again.
 
-1. Open **Audio MIDI Setup** → `+` → **Create Multi-Output Device**.
-2. Tick your speakers/headphones **and** `BlackHole 2ch`.
-3. System Settings → Sound → Output → select that Multi-Output Device.
+If you prefer the old virtual-driver path and have admin access, install
+BlackHole and create a Multi-Output Device:
+
+```bash
+make install-blackhole
+make run-blackhole
+```
+
+In **Audio MIDI Setup** → `+` → **Create Multi-Output Device**, tick your
+speakers/headphones and `BlackHole 2ch`, then select that Multi-Output Device in
+System Settings → Sound → Output.
 
 ## Makefile targets
 
@@ -39,10 +47,15 @@ hear the meeting while BlackHole captures it:
 | `make setup` | create `.venv`, install `requirements.txt` |
 | `make doctor` | check Python / Homebrew / BlackHole / Ollama / API key |
 | `make install-blackhole` | `brew install blackhole-2ch` |
+| `make screencapture-helper` | build the no-admin macOS ScreenCaptureKit audio helper |
 | `make model` | pre-download the Whisper model (default `base.en`) |
 | `make ollama-pull` | pre-pull the Ollama model (default `qwen2.5:7b`) |
-| `make run` | live translator, Claude backend |
-| `make run-local` | live translator, Ollama backend |
+| `make run` | live translator, Claude backend, ScreenCaptureKit audio |
+| `make run-local` | live translator, Ollama backend, ScreenCaptureKit audio |
+| `make run-sck` | alias for `make run` |
+| `make run-sck-local` | alias for `make run-local` |
+| `make run-blackhole` | live translator, Claude backend, BlackHole audio |
+| `make run-blackhole-local` | live translator, Ollama backend, BlackHole audio |
 | `make test` | generate synthetic audio (`say`) and run the e2e pipeline |
 | `make test-wav WAV=…` | run the e2e pipeline on a specific WAV file |
 | `make clean` | remove `.venv` |
@@ -72,7 +85,9 @@ operation use the Ollama backend. Recommended Ollama models for Vietnamese:
 
 | var | default | notes |
 |---|---|---|
+| `AUDIO_SOURCE` | `sounddevice` | `sounddevice` for mic/BlackHole, `screencapturekit` for no-admin system audio on macOS 13+ |
 | `AUDIO_INPUT` | default mic | substring match against device name; `BlackHole` for system audio |
+| `SCK_AUDIO_HELPER` | `./.build/screencapture_audio` | helper binary used when `AUDIO_SOURCE=screencapturekit` |
 | `WHISPER_MODEL` | `base.en` | streaming needs a model that finishes a tick in < ~400 ms. `tiny.en` is snappier on weak CPUs; `small.en` / `medium.en` only if you have a GPU. |
 | `WHISPER_DEVICE` | `auto` | `cpu`, `cuda`, or `auto` |
 | `WHISPER_COMPUTE` | `int8` | `int8` (CPU), `float16` (GPU) |
@@ -89,8 +104,9 @@ require source builds of `ctranslate2` / `onnxruntime`.
 
 ## How it works
 
-- `sounddevice` reads 30 ms PCM frames at 16 kHz into a preallocated ring
-  buffer (~25 s cap).
+- Audio capture feeds 30 ms PCM frames at 16 kHz into a preallocated ring buffer
+  (~25 s cap). The default path uses `sounddevice`; the no-admin macOS path uses
+  a ScreenCaptureKit helper that writes raw PCM to `translator.py`.
 - Every `TICK_INTERVAL` (~400 ms) a worker runs `faster-whisper` over the whole
   current ring with word-level timestamps.
 - **LocalAgreement-2**: a word is "confirmed" when it appears at the same

@@ -16,10 +16,12 @@ from __future__ import annotations
 import os
 import queue
 import re
+import select
 import sys
 import threading
 import time
 import tkinter as tk
+import subprocess
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -44,7 +46,9 @@ TRANSLATION_STOP = object()
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "auto")
 WHISPER_COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8")
+AUDIO_SOURCE = os.environ.get("AUDIO_SOURCE", "sounddevice").lower()  # sounddevice | screencapturekit
 INPUT_DEVICE = os.environ.get("AUDIO_INPUT")  # substring match against device name
+SCK_AUDIO_HELPER = os.environ.get("SCK_AUDIO_HELPER", "./.build/screencapture_audio")
 
 TRANSLATION_BACKEND = os.environ.get("TRANSLATION_BACKEND", "claude").lower()  # claude | ollama
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
@@ -337,6 +341,19 @@ def validate_input_stream(device: int) -> None:
     print("[audio] input stream validated", file=sys.stderr)
 
 
+def validate_screencapturekit_helper() -> None:
+    if sys.platform != "darwin":
+        raise RuntimeError("ScreenCaptureKit audio is only available on macOS.")
+    if not os.path.exists(SCK_AUDIO_HELPER):
+        raise RuntimeError(
+            f"ScreenCaptureKit helper not found at {SCK_AUDIO_HELPER!r}. "
+            "Run 'make screencapture-helper' first."
+        )
+    if not os.access(SCK_AUDIO_HELPER, os.X_OK):
+        raise RuntimeError(f"ScreenCaptureKit helper is not executable: {SCK_AUDIO_HELPER!r}")
+    print(f"[audio] using ScreenCaptureKit helper: {SCK_AUDIO_HELPER}", file=sys.stderr)
+
+
 def build_translator():
     """Returns a (english_text) -> vietnamese_text callable for the configured backend."""
     backend = TRANSLATION_BACKEND
@@ -398,6 +415,46 @@ def capture_loop(ring: AudioRing, stop_evt: threading.Event, device: int) -> Non
             ring.append_int16(np.frombuffer(data, dtype=np.int16))
 
 
+def screencapturekit_loop(ring: AudioRing, stop_evt: threading.Event) -> None:
+    frame_bytes = FRAME_SAMPLES * 2
+    pending = bytearray()
+    proc = subprocess.Popen(
+        [SCK_AUDIO_HELPER],
+        stdout=subprocess.PIPE,
+        stderr=None,
+        bufsize=0,
+    )
+    try:
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        print("[audio] ScreenCaptureKit capture started", file=sys.stderr)
+        while not stop_evt.is_set():
+            readable, _, _ = select.select([fd], [], [], 0.2)
+            if not readable:
+                if proc.poll() is not None:
+                    raise RuntimeError(f"ScreenCaptureKit helper exited with code {proc.returncode}")
+                continue
+
+            chunk = os.read(fd, frame_bytes * 4)
+            if not chunk:
+                raise RuntimeError(f"ScreenCaptureKit helper exited with code {proc.poll()}")
+            pending.extend(chunk)
+
+            full_bytes = (len(pending) // frame_bytes) * frame_bytes
+            if full_bytes:
+                data = bytes(pending[:full_bytes])
+                del pending[:full_bytes]
+                ring.append_int16(np.frombuffer(data, dtype=np.int16))
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
 def stt_loop(
     asr: StreamingASR,
     sentences: SentenceBuffer,
@@ -450,9 +507,15 @@ def main() -> None:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    input_device: int | None = None
     try:
-        input_device = pick_input_device()
-        validate_input_stream(input_device)
+        if AUDIO_SOURCE == "sounddevice":
+            input_device = pick_input_device()
+            validate_input_stream(input_device)
+        elif AUDIO_SOURCE == "screencapturekit":
+            validate_screencapturekit_helper()
+        else:
+            raise ValueError("AUDIO_SOURCE must be 'sounddevice' or 'screencapturekit'.")
     except Exception as exc:
         print(f"error: audio input unavailable: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -468,7 +531,11 @@ def main() -> None:
     overlay = Overlay()
     stop_evt = threading.Event()
 
-    capture_thread = threading.Thread(target=capture_loop, args=(ring, stop_evt, input_device), daemon=True)
+    if AUDIO_SOURCE == "sounddevice":
+        assert input_device is not None
+        capture_thread = threading.Thread(target=capture_loop, args=(ring, stop_evt, input_device), daemon=True)
+    else:
+        capture_thread = threading.Thread(target=screencapturekit_loop, args=(ring, stop_evt), daemon=True)
     stt_thread = threading.Thread(target=stt_loop, args=(asr, sentences, overlay, stop_evt), daemon=True)
     tr_thread = threading.Thread(target=translate_loop, args=(trans_q, overlay, translate), daemon=False)
     capture_thread.start()

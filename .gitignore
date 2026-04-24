@@ -1,5 +1,5 @@
 .venv/
+.build/
 __pycache__/
 *.py[cod]
 .DS_Store
-

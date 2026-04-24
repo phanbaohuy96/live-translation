@@ -6,24 +6,28 @@ PY           := $(VENV)/bin/python
 PIP          := $(VENV)/bin/pip
 WHISPER_MODEL ?= base.en
 OLLAMA_MODEL ?= qwen2.5:7b
+SCK_HELPER   ?= .build/screencapture_audio
 WAV          ?= /tmp/test.wav
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup install-blackhole install-ollama model ollama-pull ollama-warmup run run-local test test-local test-wav mic-test clean doctor
+.PHONY: help setup install-blackhole screencapture-helper install-ollama model ollama-pull ollama-warmup run run-local run-sck run-sck-local run-blackhole run-blackhole-local test test-local test-wav mic-test clean doctor
 
 help:
 	@echo "Live EN → VI translator"
 	@echo ""
 	@echo "  make setup              create venv and install deps"
 	@echo "  make install-blackhole  install BlackHole 2ch (requires Homebrew)"
+	@echo "  make screencapture-helper build no-admin macOS system-audio helper"
 	@echo "  make install-ollama     install Ollama + start the server (requires Homebrew)"
 	@echo "  make model              pre-download the Whisper model ($(WHISPER_MODEL))"
 	@echo "  make ollama-pull        pre-pull and warm up the Ollama model ($(OLLAMA_MODEL))"
 	@echo "  make ollama-warmup      pin the Ollama model into RAM (speeds up first translation)"
 	@echo ""
-	@echo "  make run                live translator — Claude backend (needs ANTHROPIC_API_KEY)"
-	@echo "  make run-local          live translator — Ollama backend (needs Ollama running)"
+	@echo "  make run                live translator — ScreenCaptureKit audio + Claude"
+	@echo "  make run-local          live translator — ScreenCaptureKit audio + Ollama"
+	@echo "  make run-blackhole      live translator — BlackHole audio + Claude"
+	@echo "  make run-blackhole-local live translator — BlackHole audio + Ollama"
 	@echo ""
 	@echo "  make test               e2e on synthetic WAV — Claude backend (needs ANTHROPIC_API_KEY)"
 	@echo "  make test-local         e2e on synthetic WAV — Ollama backend"
@@ -58,6 +62,13 @@ install-blackhole:
 	@echo "tick your speakers/headphones AND 'BlackHole 2ch', then"
 	@echo "System Settings → Sound → Output → select that Multi-Output Device."
 
+screencapture-helper: macos_screencapture_audio.swift
+	@mkdir -p .build
+	xcrun swiftc -O -parse-as-library -module-cache-path .build/swift-module-cache \
+		-framework ScreenCaptureKit -framework CoreMedia -framework AudioToolbox \
+		macos_screencapture_audio.swift -o $(SCK_HELPER)
+	@echo "Built $(SCK_HELPER)"
+
 model: setup
 	$(PY) -c "from faster_whisper import WhisperModel; WhisperModel('$(WHISPER_MODEL)')"
 	@echo "Whisper model '$(WHISPER_MODEL)' cached."
@@ -87,11 +98,26 @@ ollama-warmup:
 		-d '{"model":"$(OLLAMA_MODEL)","prompt":"hi","stream":false,"keep_alive":"30m"}' \
 		-o /dev/null --max-time 120 && echo "Model warmed up and pinned in RAM for 30 min." || echo "Warmup failed — first translation may be slow."
 
-run: setup
+run: setup screencapture-helper
 	@test -n "$$ANTHROPIC_API_KEY" || { echo "error: ANTHROPIC_API_KEY is unset. Export it or use 'make run-local'."; exit 1; }
+	AUDIO_SOURCE=screencapturekit SCK_AUDIO_HELPER=$(SCK_HELPER) WHISPER_MODEL=$(WHISPER_MODEL) TRANSLATION_BACKEND=claude $(PY) translator.py
+
+run-local: setup screencapture-helper
+	@curl -s -o /dev/null --max-time 2 $(or $(OLLAMA_URL),http://localhost:11434)/api/tags || { \
+		echo "error: Ollama doesn't appear to be running at $(or $(OLLAMA_URL),http://localhost:11434)."; \
+		echo "Start it with 'ollama serve' (or open the Ollama app), then 'make ollama-pull'."; \
+		exit 1; }
+	AUDIO_SOURCE=screencapturekit SCK_AUDIO_HELPER=$(SCK_HELPER) WHISPER_MODEL=$(WHISPER_MODEL) TRANSLATION_BACKEND=ollama OLLAMA_MODEL=$(OLLAMA_MODEL) $(PY) translator.py
+
+run-sck: run
+
+run-sck-local: run-local
+
+run-blackhole: setup
+	@test -n "$$ANTHROPIC_API_KEY" || { echo "error: ANTHROPIC_API_KEY is unset. Export it or use 'make run-blackhole-local'."; exit 1; }
 	AUDIO_INPUT=BlackHole WHISPER_MODEL=$(WHISPER_MODEL) TRANSLATION_BACKEND=claude $(PY) translator.py
 
-run-local: setup
+run-blackhole-local: setup
 	@curl -s -o /dev/null --max-time 2 $(or $(OLLAMA_URL),http://localhost:11434)/api/tags || { \
 		echo "error: Ollama doesn't appear to be running at $(or $(OLLAMA_URL),http://localhost:11434)."; \
 		echo "Start it with 'ollama serve' (or open the Ollama app), then 'make ollama-pull'."; \
