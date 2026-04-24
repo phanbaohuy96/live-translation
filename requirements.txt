@@ -1,0 +1,5 @@
+sounddevice==0.5.1
+numpy>=1.26,<3
+faster-whisper==1.1.0
+requests>=2.31  # imported by faster-whisper 1.1.0 but not declared as a dep; also used by the Ollama backend
+anthropic>=0.39,<1
