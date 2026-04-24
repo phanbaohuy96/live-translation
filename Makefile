@@ -11,7 +11,7 @@ WAV          ?= /tmp/test.wav
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup install-blackhole screencapture-helper install-ollama model ollama-pull ollama-warmup run run-local run-sck run-sck-local run-blackhole run-blackhole-local test test-local test-wav mic-test clean doctor
+.PHONY: help setup install-blackhole screencapture-helper install-ollama model ollama-pull ollama-warmup run run-local run-sck run-sck-local run-blackhole run-blackhole-local test test-local test-sck test-sck-local test-wav mic-test clean doctor
 
 help:
 	@echo "Live EN → VI translator"
@@ -31,6 +31,8 @@ help:
 	@echo ""
 	@echo "  make test               e2e on synthetic WAV — Claude backend (needs ANTHROPIC_API_KEY)"
 	@echo "  make test-local         e2e on synthetic WAV — Ollama backend"
+	@echo "  make test-sck           e2e on ScreenCaptureKit capture — Claude backend"
+	@echo "  make test-sck-local     e2e on ScreenCaptureKit capture — Ollama backend"
 	@echo "  make test-wav WAV=path  e2e on a specific WAV file (honours TRANSLATION_BACKEND)"
 	@echo "  make mic-test           live meter — diagnose whether BlackHole is receiving audio"
 	@echo "  make doctor             check that prerequisites are installed"
@@ -50,9 +52,9 @@ $(VENV)/.deps-installed: $(VENV)/bin/python requirements.txt
 setup: $(VENV)/.deps-installed
 	@echo ""
 	@echo "Setup complete. Next:"
-	@echo "  1) make install-blackhole     (one-time)"
-	@echo "  2) export ANTHROPIC_API_KEY=sk-ant-...  (or 'make ollama-pull' for local)"
-	@echo "  3) make run                   (or 'make run-local')"
+	@echo "  1) export ANTHROPIC_API_KEY=sk-ant-...  (or 'make ollama-pull' for local)"
+	@echo "  2) make run                   (or 'make run-local')"
+	@echo "  3) grant Screen & System Audio Recording permission if macOS prompts"
 
 install-blackhole:
 	@command -v brew >/dev/null || { echo "Homebrew not found. Install from https://brew.sh first."; exit 1; }
@@ -140,6 +142,17 @@ test-local: setup /tmp/test.wav
 		echo "Start it with 'ollama serve' or 'brew services start ollama'."; \
 		exit 1; }
 	WHISPER_MODEL=$(WHISPER_MODEL) TRANSLATION_BACKEND=ollama OLLAMA_MODEL=$(OLLAMA_MODEL) $(PY) e2e_test.py /tmp/test.wav
+
+test-sck: setup screencapture-helper
+	@test -n "$$ANTHROPIC_API_KEY" || { echo "error: ANTHROPIC_API_KEY is unset. Export it, or run 'make test-sck-local' to use Ollama."; exit 1; }
+	SCK_AUDIO_HELPER=$(SCK_HELPER) WHISPER_MODEL=$(WHISPER_MODEL) TRANSLATION_BACKEND=claude $(PY) sck_e2e_test.py test_script.txt
+
+test-sck-local: setup screencapture-helper
+	@curl -s -o /dev/null --max-time 2 $(or $(OLLAMA_URL),http://localhost:11434)/api/tags || { \
+		echo "error: Ollama server not reachable at $(or $(OLLAMA_URL),http://localhost:11434)."; \
+		echo "Start it with 'ollama serve' or 'brew services start ollama'."; \
+		exit 1; }
+	SCK_AUDIO_HELPER=$(SCK_HELPER) WHISPER_MODEL=$(WHISPER_MODEL) TRANSLATION_BACKEND=ollama OLLAMA_MODEL=$(OLLAMA_MODEL) $(PY) sck_e2e_test.py test_script.txt
 
 test-wav: setup
 	@test -f "$(WAV)" || { echo "error: WAV file not found: $(WAV)"; echo "Usage: make test-wav WAV=/path/to/file.wav"; exit 1; }

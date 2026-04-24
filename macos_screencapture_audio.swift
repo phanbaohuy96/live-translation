@@ -107,8 +107,10 @@ final class CaptureRunner {
     private var stream: SCStream?
     private let output = SystemAudioOutput()
 
-    func start() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    func start() throws {
+        fputs("[sck] requesting shareable content\n", stderr)
+        let content = try getShareableContent()
+        fputs("[sck] found \(content.displays.count) display(s)\n", stderr)
         guard let display = content.displays.first else {
             throw RuntimeError("no capturable display found")
         }
@@ -125,10 +127,53 @@ final class CaptureRunner {
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
         try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue(label: "sck-audio"))
-        try await stream.startCapture()
+        try startCapture(stream)
         self.stream = stream
 
         fputs("[sck] capture started; grant Screen Recording permission if macOS prompts\n", stderr)
+    }
+
+    private func getShareableContent() throws -> SCShareableContent {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: SCShareableContent?
+        var failure: Error?
+
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
+            result = content
+            failure = error
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + 20) != .success {
+            throw RuntimeError(
+                "timed out while requesting shareable content; grant Screen & System Audio Recording permission and rerun"
+            )
+        }
+
+        if let failure {
+            throw failure
+        }
+        guard let result else {
+            throw RuntimeError("ScreenCaptureKit returned no shareable content")
+        }
+        return result
+    }
+
+    private func startCapture(_ stream: SCStream) throws {
+        let semaphore = DispatchSemaphore(value: 0)
+        var failure: Error?
+
+        fputs("[sck] starting stream\n", stderr)
+        stream.startCapture { error in
+            failure = error
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + 10) != .success {
+            throw RuntimeError("timed out while starting ScreenCaptureKit stream")
+        }
+
+        if let failure {
+            throw failure
+        }
     }
 }
 
@@ -150,7 +195,7 @@ struct ScreenCaptureAudioMain {
 
         do {
             let runner = CaptureRunner()
-            try await runner.start()
+            try runner.start()
             dispatchMain()
         } catch {
             fputs("[sck] failed to start capture: \(error)\n", stderr)

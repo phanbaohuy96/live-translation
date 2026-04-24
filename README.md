@@ -57,6 +57,8 @@ System Settings → Sound → Output.
 | `make run-blackhole` | live translator, Claude backend, BlackHole audio |
 | `make run-blackhole-local` | live translator, Ollama backend, BlackHole audio |
 | `make test` | generate synthetic audio (`say`) and run the e2e pipeline |
+| `make test-sck` | play synthetic speech and test ScreenCaptureKit capture end to end |
+| `make test-sck-local` | same as `test-sck`, but with Ollama translation |
 | `make test-wav WAV=…` | run the e2e pipeline on a specific WAV file |
 | `make clean` | remove `.venv` |
 
